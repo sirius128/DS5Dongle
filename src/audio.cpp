@@ -24,6 +24,7 @@
 #include "pico/flash.h"
 #include "pico/util/queue.h"
 #include "config.h"
+#include "diag.h"
 
 #define INPUT_CHANNELS    4
 #define OUTPUT_CHANNELS   2
@@ -171,6 +172,7 @@ void __not_in_flash_func(audio_bt_task)() {
     }
 #endif
     bt_write(pkt, sizeof(pkt));
+    haptic_diag.bt39_sent++;
 }
 
 void __not_in_flash_func(audio_loop)() {
@@ -313,11 +315,21 @@ void __not_in_flash_func(audio_loop)() {
 
         in_buf[i * 2] = raw[i * INPUT_CHANNELS + 2]  / 32768.0f;
         in_buf[i * 2 + 1] = raw[i * INPUT_CHANNELS + 3]  / 32768.0f;
+        for (int ch = 0; ch < 2; ch++) {
+            const int s = raw[i * INPUT_CHANNELS + 2 + ch];
+            const uint16_t a = static_cast<uint16_t>(s < 0 ? -s : s);
+            if (a > haptic_diag.in_peak) haptic_diag.in_peak = a;
+            const float f = in_buf[i * 2 + ch];
+            haptic_diag.in_sumsq += f * f;
+        }
     }
+    haptic_diag.usb_frames_in += nframes;
+    haptic_diag.in_count += nframes * 2;
 
     // 3. 48kHz -> 3kHz 重采样
     static WDL_ResampleSample out_buf[SAMPLE_SIZE]; // 64 floats = 32帧 × 2ch
     const int out_frames = resampler.ResampleOut(out_buf, nframes, nframes / 4, OUTPUT_CHANNELS);
+    haptic_diag.rs_frames_out += out_frames;
 
     static int8_t haptic_buf[SAMPLE_SIZE];
     static int haptic_buf_pos = 0;
@@ -328,6 +340,15 @@ void __not_in_flash_func(audio_loop)() {
         int val_r = static_cast<int>(out_buf[i * 2 + 1] * 127.0f * haptics_gain);
         haptic_buf[haptic_buf_pos++] = static_cast<int8_t>(clamp(val_l, -128, 127));
         haptic_buf[haptic_buf_pos++] = static_cast<int8_t>(clamp(val_r, -128, 127));
+        for (const int v : {val_l, val_r}) {
+            if (v > 127 || v < -128) haptic_diag.out_clipped++;
+            const int c = clamp(v, -128, 127);
+            const uint16_t a = static_cast<uint16_t>(c < 0 ? -c : c);
+            if (a > haptic_diag.out_peak) haptic_diag.out_peak = a;
+            const float f = c / 128.0f;
+            haptic_diag.out_sumsq += f * f;
+        }
+        haptic_diag.out_count += 2;
 
         if (haptic_buf_pos != SAMPLE_SIZE) {
             continue;
@@ -336,7 +357,9 @@ void __not_in_flash_func(audio_loop)() {
         memcpy(element.data, haptic_buf,SAMPLE_SIZE);
         if (queue_is_full(&haptics_fifo)) {
             queue_try_remove(&haptics_fifo, NULL);
+            haptic_diag.blocks_overwritten++;
         }
+        haptic_diag.blocks_made++;
         if (!queue_try_add(&haptics_fifo, &element)) {
             printf("[Audio] Warning: haptics_fifo add failed\n");
         }

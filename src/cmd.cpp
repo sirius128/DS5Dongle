@@ -13,6 +13,7 @@
 #include "device/usbd.h"
 #include "pico/time.h"
 #include "audio.h"
+#include "diag.h"
 #include "usb.h"
 
 extern bool spk_active;
@@ -61,7 +62,9 @@ uint16_t pico_cmd_get(uint8_t report_id, uint8_t *buffer, uint16_t reqlen) {
             if (audio_mic_active() && get_config().mic_select != 3) flags |= 0x01;
             if (spk_active && get_config().speaker_select != 3) flags |= 0x02;
             buffer[1] = flags;
-            return 2;
+            // bytes 2..: haptics pipeline diagnostics (see diag.cpp)
+            const uint16_t diag_len = diag_fill(buffer, reqlen);
+            return diag_len ? diag_len : 2;
         }
 #if ENABLE_VERBOSE
         printf("[HID] 0xf9 RSSI=%d raw=0x%02X\n", rssi, buffer[0]);

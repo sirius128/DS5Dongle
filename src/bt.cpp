@@ -27,6 +27,7 @@
 #if ENABLE_BATT_LED
 #include "battery_led.h"
 #endif
+#include "diag.h"
 #if PICO_RP2350
 #include "hardware/regs/sio.h"
 #endif
@@ -829,6 +830,7 @@ static void __not_in_flash_func(l2cap_packet_handler)(uint8_t packet_type, uint1
             if (queue_try_remove(&send_fifo, &send_packet)) {
                 const uint8_t status = l2cap_send(hid_interrupt_cid, send_packet.data, send_packet.len);
                 if (status != 0) {
+                    haptic_diag.l2cap_send_err++;
                     printf("[L2CAP] L2CAP Send Error, Status: 0x%02X\n", status);
                 }
             }
@@ -860,9 +862,12 @@ void __not_in_flash_func(bt_write)(const uint8_t *data, const uint16_t len) {
     fill_output_report_checksum(packet.data + 1, len);
 
     if (!queue_try_add(&send_fifo, &packet)) {
+        haptic_diag.bt_write_fail++;
         printf("[L2CAP bt_write] Error: Failed to add packet to send FIFO\n");
         return;
     }
+    const uint8_t level = static_cast<uint8_t>(queue_get_level(&send_fifo));
+    if (level > haptic_diag.send_fifo_max) haptic_diag.send_fifo_max = level;
     if (queue_get_level(&send_fifo) == 1) {
         l2cap_request_can_send_now_event(hid_interrupt_cid);
     }
