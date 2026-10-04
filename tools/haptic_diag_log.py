@@ -18,6 +18,24 @@ import hid
 VID, PID = 0x054C, 0x0CE6
 
 
+def open_shared():
+    """Open the dongle without seizing it.
+
+    hidapi on macOS opens devices with kIOHIDOptionsTypeSeizeDevice by default,
+    which steals the controller's input from games while logging. hid_init()
+    resets the flag, so enumerate first (forces hid_init) and then clear it.
+    """
+    hid.enumerate(VID, PID)
+    if sys.platform == "darwin":
+        import ctypes
+        lib = ctypes.CDLL(hid.__file__)
+        lib.hid_darwin_set_open_exclusive.argtypes = [ctypes.c_int]
+        lib.hid_darwin_set_open_exclusive(0)
+    dev = hid.device()
+    dev.open(VID, PID)
+    return dev
+
+
 def read_diag(dev):
     r = bytes(dev.get_feature_report(0xF9, 64))
     if r and r[0] == 0xF9:
@@ -71,8 +89,7 @@ def main():
     ap.add_argument("-o", "--output", default="haptic_diag.csv")
     args = ap.parse_args()
 
-    dev = hid.device()
-    dev.open(VID, PID)
+    dev = open_shared()
     out = open(args.output, "a", buffering=1)
     if out.tell() == 0:
         out.write(",".join(COLS) + "\n")
