@@ -67,13 +67,26 @@ def read_diag(dev):
 
 
 def read_input(dev):
-    """Return (SensorTimestamp, battery byte) from the next 0x01 input report."""
-    for _ in range(50):
-        r = dev.read(64, 50)
+    """Return (SensorTimestamp, battery byte) from the freshest 0x01 input report.
+
+    hidapi buffers input reports between polls, so drain the backlog first;
+    using a stale report skews the clock estimate by the buffering delay.
+    """
+    latest = None
+    for _ in range(64):  # bounded: reports keep arriving at ~660 Hz
+        r = dev.read(64, 0)
+        if not r:
+            break
+        if r[0] == 0x01 and len(r) >= 64:
+            latest = r
+    if latest is None:
+        r = dev.read(64, 100)
         if r and r[0] == 0x01 and len(r) >= 64:
-            b = bytes(r[1:])
-            return struct.unpack_from("<I", b, 27)[0], b[52]
-    return None, None
+            latest = r
+    if latest is None:
+        return None, None
+    b = bytes(latest[1:])
+    return struct.unpack_from("<I", b, 27)[0], b[52]
 
 
 COLS = ["host_s", "uptime_s", "connected", "rssi", "battery",
@@ -97,24 +110,34 @@ def main():
 
     t0 = time.monotonic()
     prev = None
-    ts_base = None  # (host_t, unwrapped controller ts)
+    pts = []  # (host_t, unwrapped controller ts) since the controller (re)connected
     ts_last = None
     ts_wraps = 0
     while True:
         now = time.monotonic()
         d = read_diag(dev)
         ts, batt = read_input(dev)
+        t_ts = time.monotonic()
         ppm = ""
-        if ts is not None:
+        if ts is not None and d["connected"]:
             if ts_last is not None and ts < ts_last:
-                ts_wraps += 1
+                if ts_last - ts > 2**31:
+                    ts_wraps += 1      # 32-bit counter wrapped
+                else:
+                    pts, ts_wraps = [], 0  # controller restarted: clock reset
             ts_last = ts
-            ts_u = ts + ts_wraps * 2**32
-            if ts_base is None or not d["connected"]:
-                ts_base = (now, ts_u)
-            elif now - ts_base[0] > 5:
-                rate = (ts_u - ts_base[1]) / (now - ts_base[0])
-                ppm = "%+.1f" % ((rate / 3e6 - 1) * 1e6)
+            pts.append((t_ts, ts + ts_wraps * 2**32))
+            if pts[-1][0] - pts[0][0] > 10:
+                # least-squares slope: immune to the constant report-buffering offset
+                n = len(pts)
+                hx = [p[0] - pts[0][0] for p in pts]
+                cy = [p[1] - pts[0][1] for p in pts]
+                mx, my = sum(hx) / n, sum(cy) / n
+                sxx = sum((x - mx) ** 2 for x in hx)
+                sxy = sum((x - mx) * (y - my) for x, y in zip(hx, cy))
+                ppm = "%+.1f" % ((sxy / sxx / 3e6 - 1) * 1e6)
+        elif not d["connected"]:
+            pts, ts_last, ts_wraps = [], None, 0
         if prev is not None:
             dt = (d["uptime_ms"] - prev["uptime_ms"]) / 1000 or 1
             delta = lambda k: d[k] - prev[k]
